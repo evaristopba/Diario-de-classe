@@ -1064,7 +1064,6 @@
                 <div class="user-info">
                     <span id="current-teacher"></span>
                     <span id="current-year-badge" class="year-badge"></span>
-                    <button onclick="migrarParaEstruturaCompartilhada()" style="background: #f39c12;" title="Move escolas/turmas (com os alunos dentro) da sua gaveta privada para a estrutura compartilhada, com atribuição automática pra você">🔄 Migrar p/ Estrutura Compartilhada</button>
                     <button onclick="logout()">Sair</button>
                 </div>
             </header>
@@ -1969,23 +1968,16 @@
         // turma), então NÃO passam pela gaveta — ficam em caminhos reais fixos:
         // diario-classe/escolas, diario-classe/turmas, diario-classe/atribuicoes.
         let currentUserUid = null;
-        const CAMINHOS_COMPARTILHADOS = ['diario-classe/escolas', 'diario-classe/turmas', 'diario-classe/atribuicoes'];
 
         function dc(subPath) {
             if (!currentUserUid) throw new Error('Usuário não autenticado.');
             return 'diario-classe/dados/' + currentUserUid + (subPath ? '/' + subPath : '');
         }
 
-        function ehCaminhoCompartilhado(path) {
-            return CAMINHOS_COMPARTILHADOS.some(function(prefixo) { return path.indexOf(prefixo) === 0; });
-        }
-
         const db = {
             ref: function(path) {
                 if (typeof path === 'string' && path.indexOf('diario-classe/') === 0 && path.indexOf('diario-classe/dados/') !== 0) {
-                    if (!ehCaminhoCompartilhado(path)) {
-                        path = dc(path.substring('diario-classe/'.length));
-                    }
+                    path = dc(path.substring('diario-classe/'.length));
                 }
                 return dbRoot.ref(path);
             }
@@ -2210,73 +2202,6 @@
             }
         });
 
-        // ============================================
-        // MIGRAÇÃO: gaveta privada → estrutura compartilhada (Bloco 1)
-        // ============================================
-        // Move escolas/turmas da sua gaveta pessoal pra diario-classe/escolas
-        // e diario-classe/turmas, aninhando os alunos de cada turma dentro
-        // dela, e cria automaticamente sua atribuição pra cada turma migrada.
-        // Não apaga nada da gaveta original. Rode uma vez só; rodar de novo
-        // não duplica (mesmas chaves, mesmos valores).
-        async function migrarParaEstruturaCompartilhada() {
-            if (!currentUserUid) return showAlert('Faça login primeiro!', 'Atenção', '⚠️');
-
-            showConfirm(
-                'Isso vai mover suas escolas e turmas (com os alunos dentro) para a nova estrutura compartilhada, e criar automaticamente sua atribuição em cada turma migrada. Os dados antigos na sua gaveta pessoal NÃO serão apagados. Deseja continuar?',
-                async function() {
-                    showAlert('Migrando estrutura, aguarde...', 'Aguarde', '⏳');
-                    try {
-                        const escolasSnap = await dbRoot.ref(dc('escolas')).once('value');
-                        const turmasSnap = await dbRoot.ref(dc('turmas')).once('value');
-                        const alunosSnap = await dbRoot.ref(dc('alunos')).once('value');
-
-                        const escolasVal = escolasSnap.val() || {};
-                        const turmasVal = turmasSnap.val() || {};
-                        const alunosVal = alunosSnap.val() || {};
-
-                        const updates = {};
-                        let totalEscolas = 0, totalTurmas = 0, totalAlunos = 0;
-
-                        Object.keys(escolasVal).forEach(function(id) {
-                            updates['diario-classe/escolas/' + id] = escolasVal[id];
-                            totalEscolas++;
-                        });
-
-                        Object.keys(turmasVal).forEach(function(turmaId) {
-                            const turma = Object.assign({}, turmasVal[turmaId]);
-                            turma.criadoPor = currentUserUid;
-
-                            const alunosDaTurma = {};
-                            Object.keys(alunosVal).forEach(function(alunoId) {
-                                if (alunosVal[alunoId].classId === turmaId) {
-                                    alunosDaTurma[alunoId] = alunosVal[alunoId];
-                                    totalAlunos++;
-                                }
-                            });
-                            if (Object.keys(alunosDaTurma).length > 0) {
-                                turma.alunos = alunosDaTurma;
-                            }
-
-                            updates['diario-classe/turmas/' + turmaId] = turma;
-                            updates['diario-classe/atribuicoes/' + currentUserUid + '/' + turmaId] = true;
-                            totalTurmas++;
-                        });
-
-                        if (totalEscolas === 0 && totalTurmas === 0) {
-                            return showAlert('Nenhuma escola/turma antiga encontrada pra migrar (ou já foi feito antes).', 'Tudo Certo', 'ℹ️');
-                        }
-
-                        await dbRoot.ref().update(updates);
-                        showAlert(totalEscolas + ' escola(s), ' + totalTurmas + ' turma(s) e ' + totalAlunos + ' aluno(s) migrados para a estrutura compartilhada com sucesso!', 'Migração Concluída', '✅');
-                        showScreen('dashboard');
-                    } catch (err) {
-                        showAlert('Erro durante a migração: ' + err.message, 'Erro', '❌');
-                    }
-                },
-                null, 'Migrar Estrutura', false
-            );
-        }
-
         // FUNÇÕES GENÉRICAS DE EDIÇÃO
         function setEditMode(type, id, path) {
             editState = { type: type, id: id, path: path };
@@ -2462,28 +2387,10 @@
                     item.className = 'list-item';
                     item.innerHTML = `<div class="list-item-info"><strong>${school.name}</strong><p>${school.address || 'Sem endereço'}</p></div>` +
                         `<div class="list-item-actions"><button class="btn-select" onclick="selectSchool('${id}')">Selecionar</button>` +
-                        `<button class="btn-delete" onclick="deleteSchoolSafely('${id}')">Excluir</button></div>`;
+                        `<button class="btn-delete" onclick="safeDelete('diario-classe/escolas', '${id}', 'diario-classe/turmas', 'schoolId', loadSchools)">Excluir</button></div>`;
                     list.appendChild(item);
                 });
             });
-        }
-
-        // Exclusão segura de escola: só consegue checar dependência nas SUAS
-        // turmas atribuídas (não dá pra enxergar turmas de outros professores
-        // por design). Se você tiver turma vinculada, bloqueia.
-        function deleteSchoolSafely(id) {
-            showConfirm('Tem certeza que deseja excluir?', function() {
-                carregarMinhasTurmas().then(function(resultados) {
-                    const vinculadas = resultados.filter(function(r) { return r.val.schoolId === id; }).length;
-                    if (vinculadas > 0) {
-                        showAlert('⛔ Exclusão bloqueada!\n\nPossui ' + vinculadas + ' turma(s) sua(s) vinculada(s).\nExclua as dependentes primeiro.', 'Atenção', '⛔');
-                    } else {
-                        db.ref('diario-classe/escolas/' + id).remove().then(loadSchools).catch(function(err) {
-                            showAlert('Erro ao excluir: ' + err.message, 'Erro', '❌');
-                        });
-                    }
-                });
-            }, null, 'Confirmar Exclusão', true);
         }
 
         function selectSchool(id) {
@@ -2517,55 +2424,25 @@
                     loadClasses();
                 });
             } else {
-                // Turma nova: precisa criar a turma E a atribuição pro criador na
-                // MESMA escrita atômica (a regra de "turma nova" só libera a
-                // criação quando a atribuição do criador já aparece junto).
-                const newId = dbRoot.ref('diario-classe/turmas').push().key;
                 data.createdAt = Date.now();
-                data.criadoPor = currentUserUid;
-                const updates = {};
-                updates['diario-classe/turmas/' + newId] = data;
-                updates['diario-classe/atribuicoes/' + currentUserUid + '/' + newId] = true;
-                dbRoot.ref().update(updates).then(function() {
+                db.ref('diario-classe/turmas').push(data).then(function() {
                     document.getElementById('class-year').value = '';
                     document.getElementById('class-shift').value = '';
                     document.getElementById('class-letter').value = '';
                     showAlert('Turma adicionada com sucesso!', 'Sucesso', '✅');
                     loadClasses();
-                }).catch(function(err) {
-                    showAlert('Erro ao criar turma: ' + err.message, 'Erro', '❌');
                 });
             }
         }
 
-        // Carrega as turmas ATRIBUÍDAS ao professor logado (não dá pra listar
-        // "todas as turmas" direto: a regra do Firebase só libera turma por
-        // turma, então primeiro lê a lista de atribuições e depois busca cada
-        // turma individualmente.
-        function carregarMinhasTurmas() {
-            if (!currentUserUid) return Promise.resolve([]);
-            return db.ref('diario-classe/atribuicoes/' + currentUserUid).once('value').then(function(atribSnap) {
-                const turmaIds = atribSnap.exists() ? Object.keys(atribSnap.val()) : [];
-                const leituras = turmaIds.map(function(tid) {
-                    return db.ref('diario-classe/turmas/' + tid).once('value').then(function(s) {
-                        return { id: tid, val: s.val() };
-                    });
-                });
-                return Promise.all(leituras).then(function(resultados) {
-                    return resultados.filter(function(r) { return r.val; });
-                });
-            });
-        }
-
         function loadClasses() {
-            carregarMinhasTurmas().then(function(resultados) {
-                resultados.sort(function(a, b) { return (a.val.createdAt || 0) - (b.val.createdAt || 0); });
+            db.ref('diario-classe/turmas').orderByChild('createdAt').once('value').then(function(snapshot) {
                 const list = document.getElementById('classes-list');
                 list.innerHTML = '';
                 classesCache = {};
-                resultados.forEach(function(r) {
-                    const turma = r.val;
-                    const id = r.id;
+                snapshot.forEach(function(child) {
+                    const turma = child.val();
+                    const id = child.key;
                     if (turma.anoLetivo && turma.anoLetivo !== currentYear) return;
                     classesCache[id] = turma;
                     const anoExibicao = turma.anoLetivo || currentYear;
@@ -2574,29 +2451,10 @@
                     item.innerHTML = `<div class="list-item-info"><strong>${turma.year}º Ano ${turma.letter} - ${turma.shift}</strong>` +
                         `<p>${turma.schoolName} | Ano Letivo: ${anoExibicao}</p></div>` +
                         `<div class="list-item-actions"><button class="btn-select" onclick="selectClass('${id}')">Selecionar</button>` +
-                        `<button class="btn-delete" onclick="deleteTurmaComAlunos('${id}')">Excluir</button></div>`;
+                        `<button class="btn-delete" onclick="safeDelete('diario-classe/turmas', '${id}', 'diario-classe/alunos', 'classId', loadClasses)">Excluir</button></div>`;
                     list.appendChild(item);
                 });
             });
-        }
-
-        // Exclusão segura de turma: bloqueia se houver alunos cadastrados
-        // dentro dela (agora os alunos moram dentro da própria turma).
-        function deleteTurmaComAlunos(id) {
-            showConfirm('Tem certeza que deseja excluir?', function() {
-                db.ref('diario-classe/turmas/' + id + '/alunos').once('value').then(function(snap) {
-                    if (snap.exists() && snap.numChildren() > 0) {
-                        showAlert('⛔ Exclusão bloqueada!\n\nPossui ' + snap.numChildren() + ' alunos vinculado(s).\nExclua os dependentes primeiro.', 'Atenção', '⛔');
-                    } else {
-                        db.ref('diario-classe/turmas/' + id).remove().then(function() {
-                            db.ref('diario-classe/atribuicoes/' + currentUserUid + '/' + id).remove();
-                            loadClasses();
-                        }).catch(function(err) {
-                            showAlert('Erro ao excluir: ' + err.message, 'Erro', '❌');
-                        });
-                    }
-                });
-            }, null, 'Confirmar Exclusão', true);
         }
 
         function selectClass(id) {
@@ -6833,15 +6691,15 @@
 
         function loadClassesForSelect(targetId) {
             targetId = targetId || 'student-class';
-            return carregarMinhasTurmas().then(function(resultados) {
+            return db.ref('diario-classe/turmas').once('value').then(function(snapshot) {
                 classesCache = {};
                 const sel = document.getElementById(targetId);
                 if (!sel) return;
                 const isFilter = targetId.startsWith('filter-');
                 sel.innerHTML = isFilter ? '<option value="">Todas as Turmas</option>' : '<option value="">Selecione a Turma</option>';
-                resultados.forEach(function(r) {
-                    const turma = r.val;
-                    const id = r.id;
+                snapshot.forEach(function(child) {
+                    const turma = child.val();
+                    const id = child.key;
                     if (turma.anoLetivo && turma.anoLetivo !== currentYear) return;
                     classesCache[id] = turma;
                     const opt = document.createElement('option');
